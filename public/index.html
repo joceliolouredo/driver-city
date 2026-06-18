@@ -1,0 +1,75 @@
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
+const path = require('path');
+const db = require('./config/database');
+
+const app = express();
+app.use(cors());
+
+// Servir os ficheiros do ecrã (frontend)
+app.use(express.static(path.join(__dirname, '../public')));
+
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
+let activeDrivers = {}; 
+let activeRides = {};
+
+io.on('connection', (socket) => {
+    socket.on('join_metaverse', async (data) => {
+        socket.userId = data.userId;
+        socket.role = data.role;
+        socket.userName = data.userName;
+
+        const wallet = await db.getUserData(data.userId);
+
+        if (data.role === 'driver') {
+            activeDrivers[socket.id] = {
+                socketId: socket.id, userId: data.userId, name: data.userName,
+                lat: data.lat || -23.5505, lng: data.lng || -46.6333, status: 'disponivel'
+            };
+            io.emit('sync_drivers_layer', Object.values(activeDrivers));
+        }
+        socket.emit('metaverse_sync_success', { wallet });
+    });
+
+    socket.on('dispatch_ride_request', (rideData) => {
+        const rideId = `ride_${Date.now()}`;
+        activeRides[rideId] = {
+            id: rideId, passengerSocket: socket.id, passengerName: socket.userName,
+            from: rideData.from, to: rideData.to, price: parseFloat(rideData.price),
+            coinReward: parseInt(rideData.coinReward), status: 'searching'
+        };
+        socket.broadcast.emit('broadcast_ride_offer', activeRides[rideId]);
+    });
+
+    socket.on('pilot_accept_mission', (data) => {
+        const ride = activeRides[data.rideId];
+        if (ride && ride.status === 'searching') {
+            ride.status = 'on_route';
+            ride.driverSocket = socket.id;
+            io.to(ride.passengerSocket).emit('mission_acquired', { driverName: socket.userName, rideId: ride.id });
+            socket.broadcast.emit('remove_ride_offer', { rideId: ride.id });
+        }
+    });
+
+    socket.on('pilot_complete_mission', async (data) => {
+        const ride = activeRides[data.rideId];
+        if (ride && ride.driverSocket === socket.id) {
+            await db.updateWallet(socket.userId, ride.price, ride.coinReward);
+            io.to(ride.passengerSocket).emit('payout_settled', { payout: ride.price, bonusCoins: Math.floor(ride.coinReward / 2), role: 'passenger' });
+            socket.emit('payout_settled', { payout: ride.price, bonusCoins: ride.coinReward, role: 'driver' });
+            delete activeRides[data.rideId];
+        }
+    });
+
+    socket.on('disconnect', () => {
+        delete activeDrivers[socket.id];
+        io.emit('sync_drivers_layer', Object.values(activeDrivers));
+    });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`🏎️ Servidor Driver City online em: http://localhost:${PORT}`));
