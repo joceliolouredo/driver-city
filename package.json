@@ -1,0 +1,10 @@
+driver-city/
+├── package.json
+├── .gitignore
+├── public/
+│   ├── index.html
+│   └── app.js
+└── src/
+    ├── server.js
+    └── config/
+        └── database.js
